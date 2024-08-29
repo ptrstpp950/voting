@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tournament Voting</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .bracket {
+            display: flex;
+            justify-content: flex-start;
+            overflow-x: auto;
+        }
+        .round {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around;
+            min-width: 250px;
+        }
+        .match {
+            margin: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            width: 230px;
+        }
+        .competitor-info {
+            cursor: pointer;
+        }
+        .competitor-description {
+            display: none;
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 0.5em;
+        }
+        .voted {
+            background-color: #e0e0e0;
+            font-weight: bold;
+        }
+        .selected-judge {
+            background-color: #4CAF50 !important;
+            color: white !important;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-8">
+    <div class="max-w-6xl mx-auto">
+        <h1 class="text-3xl font-bold mb-6 text-center">Tournament Voting</h1>
+        
+        <div id="judgeSelection" class="mb-8"></div>
+        <div id="tournamentInfo" class="mb-8 p-4 bg-white rounded shadow"></div>
+        <div id="votingSummary" class="mb-8 p-4 bg-white rounded shadow"></div>
+        <div id="bracket" class="bg-white p-4 rounded shadow mb-8"></div>
+        <div id="voteControls" class="text-center mb-8"></div>
+    </div>
+
+    <script>
+        const storageAccount = "repassage";
+        const containerName = "data2";
+        const sasToken = "?sv=2022-11-02&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2024-11-30T20:17:22Z&st=2024-08-29T11:17:22Z&spr=https,http&sig=u34Jem9wBE9B8E7MJWuYK4J64wdz3aw%2FhgYg4U0gKCI%3D";
+
+        let competitors = [];
+        let competitorsMap = new Map();
+        let judges = [
+            { id: 'judge1', name: 'Jakub Gutkowski' },
+            { id: 'judge2', name: 'Tomasz Peczek' },
+            { id: 'judge3', name: 'Piotr Stapp' }
+        ];
+        let currentJudge = null;
+        let currentRound = 1;
+        let mainBracket = [];
+        let bracketResults = [];
+
+        async function fetchVotes() {
+            console.log("Fetching votes...");
+            bracketResults = [];
+            mainBracket = [...competitors]; // Reset mainBracket to initial competitors
+
+            for (let round = 1; round <= currentRound; round++) {
+                await fetchRoundResults(round);
+                if (round < currentRound) {
+                    // Update mainBracket with winners from previous rounds
+                    const roundResults = bracketResults.filter(r => r.round === round);
+                    mainBracket = roundResults.map(r => r.winner);
+                }
+            }
+
+            // Fetch current round votes
+            for (let judge of judges) {
+                const votes = await fetchJudgeVotes(judge.id, currentRound);
+                if (currentJudge && judge.id === currentJudge.id) {
+                    currentJudge.votes = votes;
+                }
+            }
+
+            updateBracketFromVotes();
+        }
+
+        async function fetchRoundResults(round) {
+            const fileName = `results-round${round}.json`;
+            const url = `https://${storageAccount}.blob.core.windows.net/${containerName}/${fileName}${sasToken}`;
+            try {
+                const response = await fetch(url);
+                if (response.ok) {
+                    const results = await response.json();
+                    bracketResults.push(...results);
+                    console.log(`Fetched results for round ${round}:`, results);
+                } else if (response.status !== 404) {
+                    console.error(`Error fetching results for round ${round}: ${response.statusText}`);
+                }
+            } catch (error) {
+                console.error(`Error fetching results for round ${round}:`, error);
+            }
+        }
+
+        async function fetchJudgeVotes(judgeId, round) {
+            const fileName = `round-${round}-${judgeId}.json`;
+            const url = `https://${storageAccount}.blob.core.windows.net/${containerName}/${fileName}${sasToken}`;
+            try {
+                const response = await fetch(url);
+                if (response.ok) {
+                    const votes = await response.json();
+                    for (let [matchId, competitor] of Object.entries(votes)) {
+                        const matchNumber = parseInt(matchId.split('-')[1]);
+                        updateBracketResults(round, matchNumber, competitor, 1);
+                    }
+                    console.log(`Fetched votes for judge ${judgeId}, round ${round}:`, votes);
+                    return votes;
+                } else if (response.status !== 404) {
+                    console.error(`Error fetching votes for judge ${judgeId}, round ${round}: ${response.statusText}`);
+                }
+            } catch (error) {
+                console.error(`Error fetching votes for judge ${judgeId}, round ${round}:`, error);
+            }
+            return {};
+        }
+
+        function updateBracketResults(round, matchNumber, votedCompetitor, voteChange) {
+            let result = bracketResults.find(r => r.round === round && r.matchNumber === matchNumber);
+            if (!result) {
+                result = {
+                    round: round,
+                    matchNumber: matchNumber,
+                    competitor1: mainBracket[(matchNumber - 1) * 2],
+                    competitor2: mainBracket[(matchNumber - 1) * 2 + 1],
+                    votes1: 0,
+                    votes2: 0
+                };
+                bracketResults.push(result);
+            }
+            if (votedCompetitor === result.competitor1) {
+                result.votes1 += voteChange;
+            } else if (votedCompetitor === result.competitor2) {
+                result.votes2 += voteChange;
+            }
+        }
+
+        async function storeVotes(judgeId, votes, round) {
+            const fileName = `round-${round}-${judgeId}.json`;
+            const url = `https://${storageAccount}.blob.core.windows.net/${containerName}/${fileName}${sasToken}`;
+            const data = JSON.stringify(votes);
+
+            try {
+                const response = await fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-ms-blob-type': 'BlockBlob'
+                    },
+                    body: data
+                });
+
+                if (response.ok) {
+                    console.log(`Votes for judge ${judgeId}, round ${round} stored successfully`);
+                    return true;
+                } else {
+                    console.error(`Error storing votes for judge ${judgeId}, round ${round}: ${response.statusText}`);
+                    return false;
+                }
+            } catch (error) {
+                console.error(`Error storing votes for judge ${judgeId}, round ${round}:`, error);
+                return false;
+            }
+        }
+
+        function renderBracket() {
+            console.log("Rendering bracket...");
+            console.log("Current round:", currentRound);
+            console.log("Main bracket:", mainBracket);
+            console.log("Bracket results:", bracketResults);
+
+            const bracketContainer = document.getElementById('bracket');
+            let bracketHtml = `<h2 class="text-2xl font-bold mb-4">Tournament Bracket</h2>`;
+            bracketHtml += '<div class="bracket">';
+            
+            for (let round = 1; round <= currentRound; round++) {
+                bracketHtml += `<div class="round"><h3 class="text-xl font-semibold mb-2">Round ${round}</h3>`;
+                const roundMatches = bracketResults.filter(r => r.round === round);
+                const matchesCount = round === currentRound ? mainBracket.length / 2 : roundMatches.length;
+                
+                for (let i = 0; i < matchesCount; i++) {
+                    const matchNumber = i + 1;
+                    const result = roundMatches.find(r => r.matchNumber === matchNumber) || { votes1: 0, votes2: 0 };
+                    let competitor1, competitor2;
+                    
+                    if (round === currentRound) {
+                        competitor1 = mainBracket[i * 2];
+                        competitor2 = mainBracket[i * 2 + 1];
+                    } else {
+                        competitor1 = result.competitor1;
+                        competitor2 = result.competitor2;
+                    }
+                    
+                    const currentVote = currentJudge && round === currentRound ? currentJudge.votes[`${round}-${matchNumber}`] : null;
+                    const isCurrentRound = round === currentRound;
+                    
+                    bracketHtml += `
+                        <div class="match">
+                            <div class="competitor-info ${currentVote === competitor1 ? 'voted' : ''}" 
+                                 ${isCurrentRound ? `onclick="vote('${competitor1}', ${matchNumber})"` : ''}
+                                 onmouseover="showDescription('${competitor1}')"
+                                 onmouseout="hideDescription('${competitor1}')">
+                                ${competitor1} (${result.votes1})
+                                <div id="desc-${competitor1}" class="competitor-description">${competitorsMap.get(competitor1)?.description || ''}</div>
+                            </div>
+                            <div class="competitor-info ${currentVote === competitor2 ? 'voted' : ''}" 
+                                 ${isCurrentRound ? `onclick="vote('${competitor2}', ${matchNumber})"` : ''}
+                                 onmouseover="showDescription('${competitor2}')"
+                                 onmouseout="hideDescription('${competitor2}')">
+                                ${competitor2} (${result.votes2})
+                                <div id="desc-${competitor2}" class="competitor-description">${competitorsMap.get(competitor2)?.description || ''}</div>
+                            </div>
+                            ${!isCurrentRound ? `<div class="mt-2 text-sm font-semibold">Winner: ${result.winner || 'TBD'}</div>` : ''}
+                        </div>
+                    `;
+                }
+                
+                bracketHtml += '</div>';
+            }
+            
+            bracketHtml += '</div>';
+            bracketContainer.innerHTML = bracketHtml;
+
+            // Add vote controls
+            const voteControlsHtml = `
+                <button onclick="submitVotes()" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded mr-4">
+                    Submit Votes
+                </button>
+                <button onclick="clearVotes()" class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded">
+                    Clear Votes
+                </button>
+            `;
+            document.getElementById('voteControls').innerHTML = voteControlsHtml;
+        }
+
+        function vote(competitor, matchNumber) {
+            if (!currentJudge) {
+                alert("Please select a judge first");
+                return;
+            }
+
+            const matchId = `${currentRound}-${matchNumber}`;
+            currentJudge.votes = currentJudge.votes || {};
+            currentJudge.votes[matchId] = competitor;
+            renderBracket();
+        }
+
+        async function submitVotes() {
+            if (!currentJudge || !currentJudge.votes) {
+                alert("No votes to submit");
+                return;
+            }
+
+            const voteStored = await storeVotes(currentJudge.id, currentJudge.votes, currentRound);
+            if (voteStored) {
+                alert("Votes submitted successfully");
+                await fetchVotes();
+                await checkRoundCompletion();
+                renderBracket();
+            } else {
+                alert("Failed to submit votes. Please try again.");
+            }
+        }
+
+        async function checkRoundCompletion() {
+            console.log("Checking round completion...");
+            const allJudgesVotes = await Promise.all(judges.map(judge => 
+                fetchJudgeVotes(judge.id, currentRound)
+            ));
+
+            const expectedVotesCount = mainBracket.length / 2;
+            const roundComplete = allJudgesVotes.every(votes => 
+                Object.keys(votes).length === expectedVotesCount
+            );
+
+            console.log(`Round complete: ${roundComplete}, Expected votes: ${expectedVotesCount}`);
+            console.log("Judges votes:", allJudgesVotes);
+
+            updateVotingSummary(allJudgesVotes, expectedVotesCount);
+
+            if (roundComplete) {
+                console.log("Round is complete. Processing results...");
+                await processRoundResults();
+                startNextRound();
+            } else {
+                console.log("Round is not yet complete.");
+            }
+        }
+
+        function updateVotingSummary(allJudgesVotes, expectedVotesCount) {
+            const summaryElement = document.getElementById('votingSummary');
+            let summaryHtml = '<h2 class="text-xl font-bold mb-2">Voting Summary</h2>';
+
+            const missingVotes = judges.map((judge, index) => {
+                const votesCount = Object.keys(allJudgesVotes[index]).length;
+                const missingCount = expectedVotesCount - votesCount;
+                return { judge: judge.name, missing: missingCount };
+            });
+
+            const totalMissing = missingVotes.reduce((sum, judge) => sum + judge.missing, 0);
+
+            summaryHtml += `<p class="mb-2"><strong>Total missing votes to start next round:</strong> ${totalMissing}</p>`;
+            summaryHtml += '<ul>';
+            missingVotes.forEach(({ judge, missing }) => {
+                summaryHtml += `<li>${judge}: ${missing} vote${missing !== 1 ? 's' : ''} missing</li>`;
+            });
+            summaryHtml += '</ul>';
+
+            summaryElement.innerHTML = summaryHtml;
+        }
+
+        async function processRoundResults() {
+            console.log("Processing round results...");
+            const winners = [];
+            for (let i = 0; i < mainBracket.length; i += 2) {
+                const matchNumber = i / 2 + 1;
+                const result = bracketResults.find(r => r.round === currentRound && r.matchNumber === matchNumber);
+                if (result) {
+                    const winner = result.votes1 > result.votes2 ? result.competitor1 : result.competitor2;
+                    result.winner = winner;
+                    winners.push(winner);
+                    console.log(`Match ${matchNumber} winner: ${winner}`);
+                }
+            }
+            mainBracket = winners;
+            console.log("New main bracket:", mainBracket);
+            await storeRoundResults(currentRound, bracketResults.filter(r => r.round === currentRound));
+        }
+
+        async function storeRoundResults(round, results) {
+            const fileName = `results-round${round}.json`;
+            const url = `https://${storageAccount}.blob.core.windows.net/${containerName}/${fileName}${sasToken}`;
+            const data = JSON.stringify(results);
+
+            try {
+                const response = await fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-ms-blob-type': 'BlockBlob'
+                    },
+                    body: data
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                console.log(`Results for round ${round} stored successfully`);
+            } catch (error) {
+                console.error(`Error storing results for round ${round}:`, error);
+            }
+        }
+
+        function startNextRound() {
+            console.log(`Starting next round. Current round: ${currentRound}`);
+            currentRound++;
+            judges.forEach(judge => judge.votes = {});
+            fetchVotes(); // This will update mainBracket and bracketResults
+            renderTournamentInfo();
+            renderBracket();
+            alert(`Round ${currentRound - 1} completed. Starting round ${currentRound}.`);
+            console.log(`New round started. Current round: ${currentRound}`);
+        }
+
+        function clearVotes() {
+            if (currentJudge) {
+                currentJudge.votes = {};
+                renderBracket();
+            }
+        }
+
+        function updateBracketFromVotes() {
+            console.log("Updating bracket from votes...");
+            console.log("Current bracket results:", bracketResults);
+            renderBracket();
+        }
+
+        function renderJudgeSelection() {
+            const selectedJudgeId = localStorage.getItem('selectedJudgeId');
+            const judgeSelectionHtml = judges.map(judge => 
+                `<button onclick="selectJudge('${judge.id}')" 
+                         class="judge-button bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded mr-2 mb-2" 
+                         id="judge-${judge.id}">
+                    ${judge.name}
+                </button>`
+            ).join('');
+            document.getElementById('judgeSelection').innerHTML = `
+                <h2 class="text-xl font-semibold mb-3">Select a Judge:</h2>
+                ${judgeSelectionHtml}
+            `;
+            if (selectedJudgeId) {
+                updateJudgeSelectionUI(selectedJudgeId);
+            }
+        }
+
+        async function selectJudge(judgeId) {
+            currentJudge = judges.find(j => j.id === judgeId);
+            if (currentJudge) {
+                localStorage.setItem('selectedJudgeId', judgeId);
+                currentJudge.votes = {};
+                alert(`Selected judge: ${currentJudge.name}`);
+                updateJudgeSelectionUI(judgeId);
+                await fetchVotes();
+                renderBracket();
+                await checkRoundCompletion();
+            } else {
+                console.error(`Judge with id ${judgeId} not found`);
+                alert("Error selecting judge. Please try again.");
+            }
+        }
+
+        function updateJudgeSelectionUI(selectedJudgeId) {
+            judges.forEach(judge => {
+                const button = document.getElementById(`judge-${judge.id}`);
+                if (button) {
+                    if (judge.id === selectedJudgeId) {
+                        button.classList.add('selected-judge');
+                    } else {
+                        button.classList.remove('selected-judge');
+                    }
+                }
+            });
+        }
+
+        function renderTournamentInfo() {
+            document.getElementById('tournamentInfo').innerHTML = `
+                <div class="text-lg"><span class="font-semibold">Round:</span> ${currentRound}</div>
+                <div class="text-lg"><span class="font-semibold">Competitors:</span> ${competitors.join(', ')}</div>
+            `;
+        }
+
+        async function loadCompetitors() {
+            const url = `https://${storageAccount}.blob.core.windows.net/${containerName}/competitors.json${sasToken}`;
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                competitors = data.map(c => c.name);
+                competitorsMap = new Map(data.map(c => [c.name, c]));
+                console.log("Competitors loaded:", competitors);
+            } catch (error) {
+                console.error("Error loading competitors:", error);
+            }
+        }
+
+        async function startTournament() {
+            await loadCompetitors();
+            if (competitors.length > 0) {
+                mainBracket = [...competitors];
+                await fetchVotes();
+                renderTournamentInfo();
+                renderJudgeSelection();
+                renderBracket();
+                await checkRoundCompletion();
+                
+                // Restore previously selected judge
+                const selectedJudgeId = localStorage.getItem('selectedJudgeId');
+                if (selectedJudgeId) {
+                    await selectJudge(selectedJudgeId);
+                }
+            } else {
+                console.error("No competitors loaded");
+            }
+        }
+
+        function showDescription(competitor) {
+            const descElement = document.getElementById(`desc-${competitor}`);
+            if (descElement) {
+                descElement.style.display = 'block';
+            }
+        }
+
+        function hideDescription(competitor) {
+            const descElement = document.getElementById(`desc-${competitor}`);
+            if (descElement) {
+                descElement.style.display = 'none';
+            }
+        }
+
+        startTournament();
+    </script>
+</body>
+</html>
+
