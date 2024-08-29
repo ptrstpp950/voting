@@ -28,7 +28,7 @@
             cursor: pointer;
         }
         .competitor-description {
-            display: none;
+            display: block;
             font-size: 0.8em;
             color: #666;
             margin-top: 0.5em;
@@ -76,12 +76,26 @@
             bracketResults = [];
             mainBracket = [...competitors]; // Reset mainBracket to initial competitors
 
+            // Initialize first round if it doesn't exist
+            if (currentRound === 1) {
+                for (let i = 0; i < Math.floor(mainBracket.length / 2); i++) {
+                    bracketResults.push({
+                        round: 1,
+                        matchNumber: i + 1,
+                        competitor1: mainBracket[i * 2],
+                        competitor2: mainBracket[i * 2 + 1],
+                        votes1: 0,
+                        votes2: 0
+                    });
+                }
+            }
+
             for (let round = 1; round <= currentRound; round++) {
                 await fetchRoundResults(round);
                 if (round < currentRound) {
                     // Update mainBracket with winners from previous rounds
                     const roundResults = bracketResults.filter(r => r.round === round);
-                    mainBracket = roundResults.map(r => r.winner);
+                    mainBracket = roundResults.map(r => r.winner).filter(w => w); // Filter out undefined winners
                 }
             }
 
@@ -196,7 +210,7 @@
             for (let round = 1; round <= currentRound; round++) {
                 bracketHtml += `<div class="round"><h3 class="text-xl font-semibold mb-2">Round ${round}</h3>`;
                 const roundMatches = bracketResults.filter(r => r.round === round);
-                const matchesCount = round === currentRound ? mainBracket.length / 2 : roundMatches.length;
+                const matchesCount = Math.ceil(mainBracket.length / 2);
                 
                 for (let i = 0; i < matchesCount; i++) {
                     const matchNumber = i + 1;
@@ -205,30 +219,28 @@
                     
                     if (round === currentRound) {
                         competitor1 = mainBracket[i * 2];
-                        competitor2 = mainBracket[i * 2 + 1];
+                        competitor2 = mainBracket[i * 2 + 1] || 'BYE';
                     } else {
                         competitor1 = result.competitor1;
                         competitor2 = result.competitor2;
                     }
                     
+                    if (!competitor1 || !competitor2) continue; // Skip rendering if competitors are undefined
+
                     const currentVote = currentJudge && round === currentRound ? currentJudge.votes[`${round}-${matchNumber}`] : null;
                     const isCurrentRound = round === currentRound;
                     
                     bracketHtml += `
                         <div class="match">
                             <div class="competitor-info ${currentVote === competitor1 ? 'voted' : ''}" 
-                                 ${isCurrentRound ? `onclick="vote('${competitor1}', ${matchNumber})"` : ''}
-                                 onmouseover="showDescription('${competitor1}')"
-                                 onmouseout="hideDescription('${competitor1}')">
-                                ${competitor1} (${result.votes1})
-                                <div id="desc-${competitor1}" class="competitor-description">${competitorsMap.get(competitor1)?.description || ''}</div>
+                                 ${isCurrentRound ? `onclick="vote('${competitor1}', ${matchNumber})"` : ''}>
+                                ${competitor1} (${result.votes1 || 0})
+                                <div class="competitor-description">${competitorsMap.get(competitor1)?.description || ''}</div>
                             </div>
                             <div class="competitor-info ${currentVote === competitor2 ? 'voted' : ''}" 
-                                 ${isCurrentRound ? `onclick="vote('${competitor2}', ${matchNumber})"` : ''}
-                                 onmouseover="showDescription('${competitor2}')"
-                                 onmouseout="hideDescription('${competitor2}')">
-                                ${competitor2} (${result.votes2})
-                                <div id="desc-${competitor2}" class="competitor-description">${competitorsMap.get(competitor2)?.description || ''}</div>
+                                 ${isCurrentRound ? `onclick="vote('${competitor2}', ${matchNumber})"` : ''}>
+                                ${competitor2} (${result.votes2 || 0})
+                                <div class="competitor-description">${competitorsMap.get(competitor2)?.description || ''}</div>
                             </div>
                             ${!isCurrentRound ? `<div class="mt-2 text-sm font-semibold">Winner: ${result.winner || 'TBD'}</div>` : ''}
                         </div>
@@ -288,7 +300,7 @@
                 fetchJudgeVotes(judge.id, currentRound)
             ));
 
-            const expectedVotesCount = mainBracket.length / 2;
+            const expectedVotesCount = Math.ceil(mainBracket.length / 2);
             const roundComplete = allJudgesVotes.every(votes => 
                 Object.keys(votes).length === expectedVotesCount
             );
@@ -332,6 +344,7 @@
         async function processRoundResults() {
             console.log("Processing round results...");
             const winners = [];
+            const newResults = [];
             for (let i = 0; i < mainBracket.length; i += 2) {
                 const matchNumber = i / 2 + 1;
                 const result = bracketResults.find(r => r.round === currentRound && r.matchNumber === matchNumber);
@@ -339,12 +352,19 @@
                     const winner = result.votes1 > result.votes2 ? result.competitor1 : result.competitor2;
                     result.winner = winner;
                     winners.push(winner);
+                    newResults.push(result);
                     console.log(`Match ${matchNumber} winner: ${winner}`);
                 }
             }
+            
+            // Handle odd number of winners
+            if (winners.length % 2 !== 0) {
+                winners.push('BYE');
+            }
+            
             mainBracket = winners;
             console.log("New main bracket:", mainBracket);
-            await storeRoundResults(currentRound, bracketResults.filter(r => r.round === currentRound));
+            await storeRoundResults(currentRound, newResults);
         }
 
         async function storeRoundResults(round, results) {
@@ -353,7 +373,30 @@
             const data = JSON.stringify(results);
 
             try {
-                const response = await fetch(url, {
+                // Check if results already exist
+                const checkResponse = await fetch(url);
+                if (checkResponse.ok) {
+                    console.log(`Results for round ${round} already exist. Updating...`);
+                    // If results exist, update them instead of skipping
+                    const existingResults = await checkResponse.json();
+                    const updatedResults = mergeResults(existingResults, results);
+                    const updateResponse = await fetch(url, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-ms-blob-type': 'BlockBlob'
+                        },
+                        body: JSON.stringify(updatedResults)
+                    });
+                    if (!updateResponse.ok) {
+                        throw new Error(`HTTP error! status: ${updateResponse.status}`);
+                    }
+                    console.log(`Results for round ${round} updated successfully`);
+                    return;
+                }
+
+                // If results don't exist, proceed with upload
+                const uploadResponse = await fetch(url, {
                     method: 'PUT',
                     headers: {
                         'Content-Type': 'application/json',
@@ -362,13 +405,29 @@
                     body: data
                 });
 
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                if (!uploadResponse.ok) {
+                    throw new Error(`HTTP error! status: ${uploadResponse.status}`);
                 }
                 console.log(`Results for round ${round} stored successfully`);
             } catch (error) {
-                console.error(`Error storing results for round ${round}:`, error);
+                console.error(`Error handling results for round ${round}:`, error);
             }
+        }
+
+        function mergeResults(existingResults, newResults) {
+            // Merge existing results with new results, avoiding duplicates
+            const mergedResults = [...existingResults];
+            newResults.forEach(newResult => {
+                const existingIndex = mergedResults.findIndex(r => 
+                    r.round === newResult.round && r.matchNumber === newResult.matchNumber
+                );
+                if (existingIndex !== -1) {
+                    mergedResults[existingIndex] = newResult;
+                } else {
+                    mergedResults.push(newResult);
+                }
+            });
+            return mergedResults;
         }
 
         function startNextRound() {
@@ -482,20 +541,6 @@
                 }
             } else {
                 console.error("No competitors loaded");
-            }
-        }
-
-        function showDescription(competitor) {
-            const descElement = document.getElementById(`desc-${competitor}`);
-            if (descElement) {
-                descElement.style.display = 'block';
-            }
-        }
-
-        function hideDescription(competitor) {
-            const descElement = document.getElementById(`desc-${competitor}`);
-            if (descElement) {
-                descElement.style.display = 'none';
             }
         }
 
